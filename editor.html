@@ -1,0 +1,255 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>LED Badge 44×11 Editor (.led)</title>
+<style>
+  :root { --px: 18px; --gap: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 24px; display: grid; grid-template-columns: 1fr auto; gap: 24px; }
+  #grid { display: grid; grid-template-columns: repeat(44, var(--px)); grid-auto-rows: var(--px);
+          gap: var(--gap); background: #111; padding: var(--gap); border-radius: 10px; width: max-content; }
+  .cell { width: var(--px); height: var(--px); background: #222; border-radius: 4px; cursor: crosshair; }
+  .on { background: #5cf; box-shadow: 0 0 2px #5cf inset, 0 0 6px #5cf; }
+  #controls { display: grid; gap: 12px; align-content: start; }
+  button, input, textarea, select { font: inherit; }
+  textarea { width: 520px; height: 160px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .small { font-size: 12px; color: #666; }
+  #frames { font-size: 13px; }
+</style>
+<div id="grid"></div>
+
+<div id="controls">
+  <div class="row">
+    <button id="prev">◀ Prev</button>
+    <button id="next">Next ▶</button>
+    <button id="add">+ Add</button>
+    <button id="dup">⧉ Duplicate</button>
+    <button id="del">🗑 Delete</button>
+    <span id="frames"></span>
+  </div>
+
+  <div class="row">
+    <button id="clear">Clear</button>
+    <button id="invert">Invert</button>
+    <label>Brush:
+      <select id="brush">
+        <option value="toggle">Toggle</option>
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <label>Preview
+      <input type="checkbox" id="play">
+    </label>
+    <label>FPS
+      <input id="fps" type="number" min="1" max="30" value="6" style="width:60px">
+    </label>
+  </div>
+
+  <div class="row">
+    <button id="exportLed">Export .led (cons.led)</button>
+    <button id="exportPbm">Export .pbm</button>
+    <button id="importLed">Import .led</button>
+    <input id="file" type="file" accept=".led,.txt" style="display:none">
+  </div>
+
+  <div>
+    <div class="small">Paste ASCII here (uses “x” or “X” for ON; space/dot/anything else OFF). Frames separated by a line with <code>---</code> or by blank lines. Auto fits 44×11.</div>
+    <textarea id="ascii"></textarea>
+    <div class="row">
+      <button id="applyAscii">Apply ASCII</button>
+      <button id="loadSample">Load your sample</button>
+    </div>
+  </div>
+
+  <div class="small">
+    Format on export: 11 lines per frame, width 44 using <code>X</code> and <code>.</code>; frames separated by a single line <code>---</code>.
+  </div>
+</div>
+
+<script>
+(() => {
+  const W = 44, H = 11;
+  const grid = document.getElementById('grid');
+  const framesLbl = document.getElementById('frames');
+  const brushSel = document.getElementById('brush');
+  let frames = [blank()];
+  let idx = 0, mouseDown = false, timer = null;
+
+  // Build UI grid
+  const cells = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = document.createElement('div');
+      d.className = 'cell';
+      d.dataset.x = x; d.dataset.y = y;
+      grid.appendChild(d);
+      cells.push(d);
+    }
+  }
+
+  // Event handlers
+  const applyBrush = (x, y) => {
+    const mode = brushSel.value;
+    if (mode === 'toggle') frames[idx][y][x] ^= 1;
+    if (mode === 'on')     frames[idx][y][x] = 1;
+    if (mode === 'off')    frames[idx][y][x] = 0;
+    paint();
+  };
+  grid.addEventListener('mousedown', (e) => {
+    const c = e.target.closest('.cell'); if (!c) return;
+    mouseDown = true;
+    applyBrush(+c.dataset.x, +c.dataset.y);
+  });
+  window.addEventListener('mouseup', () => mouseDown = false);
+  grid.addEventListener('mouseover', (e) => {
+    if (!mouseDown) return;
+    const c = e.target.closest('.cell'); if (!c) return;
+    applyBrush(+c.dataset.x, +c.dataset.y);
+  });
+
+  // Buttons
+  byId('clear').onclick = () => { frames[idx] = blank(); paint(); };
+  byId('invert').onclick = () => { frames[idx] = frames[idx].map(r => r.map(v => v^1)); paint(); };
+  byId('add').onclick = () => { frames.splice(idx+1,0,blank()); idx++; paint(); };
+  byId('dup').onclick = () => { frames.splice(idx+1,0, clone(frames[idx])); idx++; paint(); };
+  byId('del').onclick = () => { if (frames.length>1){ frames.splice(idx,1); idx=Math.max(0,idx-1); paint(); } };
+  byId('prev').onclick = () => { idx = (idx-1+frames.length)%frames.length; paint(); };
+  byId('next').onclick = () => { idx = (idx+1)%frames.length; paint(); };
+
+  // Preview
+  byId('play').onchange = (e) => {
+    if (e.target.checked) startPreview(); else stopPreview();
+  };
+  byId('fps').onchange = () => { if (byId('play').checked){ stopPreview(); startPreview(); } };
+
+  function startPreview() {
+    stopPreview();
+    const fps = Math.max(1, Math.min(30, +byId('fps').value||6));
+    timer = setInterval(() => { idx = (idx+1)%frames.length; paint(false); }, 1000/fps);
+  }
+  function stopPreview() { if (timer) clearInterval(timer); timer = null; }
+
+  // Import / Export
+  byId('exportLed').onclick = () => {
+    const text = frames.map(f => toLedText(f)).join('\n---\n');
+    download('cons.led', text);
+  };
+  byId('exportPbm').onclick = () => {
+    // PBM (P1) for first frame
+    const f = frames[idx];
+    let s = `P1\n${W} ${H}\n`;
+    s += f.map(r => r.map(v => v?1:0).join(' ')).join('\n') + '\n';
+    download('frame.pbm', s);
+  };
+  byId('importLed').onclick = () => byId('file').click();
+  byId('file').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const text = await file.text();
+    loadFromText(text);
+  };
+
+  // ASCII textarea pipeline
+  byId('applyAscii').onclick = () => loadFromText(byId('ascii').value);
+  byId('loadSample').onclick = () => {
+    byId('ascii').value =
+`         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx         
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+xxxxxxxxxxxx          xxxxxxx          xxxxxxxxxxxx
+          xxx        xxxxxxxxx        xxx          
+           xxx      xxx     xxx      xxx           
+            xxxxxxxxxx       xxxxxxxxxx            
+              xxxxxx           xxxxxx              `;
+  };
+
+  // Helpers
+  function blank(){ return Array.from({length:H},()=>Array(W).fill(0)); }
+  function clone(f){ return f.map(r=>r.slice()); }
+  function paint(updateLabel=true){
+    for (let y=0; y<H; y++) for (let x=0; x<W; x++) {
+      const i = y*W+x; cells[i].classList.toggle('on', !!frames[idx][y][x]);
+    }
+    if (updateLabel) framesLbl.textContent = `Frame ${idx+1}/${frames.length}`;
+  }
+  function toLedText(f){
+    return f.map(r => r.map(v => v?'X':'.').join('')).join('\n');
+  }
+  function download(name, text){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], {type:'text/plain'}));
+    a.download = name; a.click(); URL.revokeObjectURL(a.href);
+  }
+  function byId(id){ return document.getElementById(id); }
+
+  // Parser: accept “x”/“X” as ON; other chars OFF. Split by '---' or blank lines. Normalize to 44×11.
+  function loadFromText(text){
+    const blocks = splitFrames(text);
+    const parsed = blocks.map(normToCanvas);
+    frames = parsed.length ? parsed : [blank()];
+    idx = 0; paint();
+  }
+  function splitFrames(text){
+    const lines = text.replace(/\r/g,'').split('\n');
+    const frames = []; let cur = [];
+    const push = () => { if (cur.length) { frames.push(cur.slice()); cur.length=0; } };
+    for (const line of lines){
+      if (/^\s*---\s*$/.test(line)) { push(); continue; }
+      if (/^\s*$/.test(line)) { if (cur.length && cur[cur.length-1] !== '') cur.push(''); else cur.push(''); continue; }
+      cur.push(line);
+    }
+    push();
+    // If no explicit '---', split on blank runs
+    if (frames.length<=1){
+      const grouped = []; let acc=[];
+      for (const ln of lines){
+        if (/^\s*$/.test(ln)) { if (acc.length) { grouped.push(acc); acc=[]; } }
+        else acc.push(ln);
+      }
+      if (acc.length) grouped.push(acc);
+      if (grouped.length>1) return grouped;
+    }
+    return frames.length?frames:[lines];
+  }
+  function normToCanvas(lines){
+    // Trim empty edges
+    while (lines.length && /^\s*$/.test(lines[0])) lines.shift();
+    while (lines.length && /^\s*$/.test(lines[lines.length-1])) lines.pop();
+    if (!lines.length) return blank();
+
+    // Map to binary with x/X = 1; others = 0
+    const rows = lines.map(l => Array.from(l, ch => (ch==='x'||ch==='X')?1:0));
+
+    // Determine content bounding box
+    let minX=Infinity, maxX=-1, minY=0, maxY=rows.length-1;
+    rows.forEach((r,y)=>{
+      const first = r.findIndex(v=>v===1);
+      const last  = r.length-1 - [...r].reverse().findIndex(v=>v===1);
+      if (first!==-1) { minX = Math.min(minX, first); maxX = Math.max(maxX, last); }
+    });
+    if (!isFinite(minX)) return blank();
+
+    // Crop to bbox
+    const cropped = rows.slice(minY, maxY+1).map(r=>r.slice(minX, maxX+1));
+    const srcH = cropped.length, srcW = cropped[0].length;
+
+    // Scale (nearest) to fit <= 44×11, preserving aspect; then center
+    const scale = Math.min(W/srcW, H/srcH, 1);
+    const out = blank();
+    const outW = Math.max(1, Math.min(W, Math.round(srcW*scale)));
+    const outH = Math.max(1, Math.min(H, Math.round(srcH*scale)));
+    for (let oy=0; oy<outH; oy++){
+      for (let ox=0; ox<outW; ox++){
+        const sy = Math.min(srcH-1, Math.floor(oy/scale));
+        const sx = Math.min(srcW-1, Math.floor(ox/scale));
+        if (cropped[sy][sx]) {
+          const yy = Math.floor((H-outH)/2)+oy;
+          const xx = Math.floor((W-outW)/2)+ox;
+          out[yy][xx] = 1;
+        }
+      }
+    }
+    return out;
+  }
+
+  paint();
+})();
+</script>
